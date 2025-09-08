@@ -675,14 +675,6 @@ export default function DiplomaDapp1155() {
           </div>
         )}
 
-        <div className="mt-10 text-xs text-neutral-500">
-          <p>
-            Dicas: se o tokenURI começar com ipfs://, o link será redirecionado
-            para ipfs.io. Gere "data:application/json;base64,..." se quiser
-            embutir o metadata sem IPFS. Em ERC-1155, se optar por usar
-            uri(id) com {"{id}"}, substitua pelo id em hex de 64 caracteres.
-          </p>
-        </div>
       </div>
     </div>
   );
