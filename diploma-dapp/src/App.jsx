@@ -3,7 +3,7 @@ import { ethers } from "ethers";
 
 
 const ABI = [
-  // events
+  // events custom
   {
     type: "event",
     name: "DiplomaIssued",
@@ -24,7 +24,33 @@ const ABI = [
     anonymous: false,
   },
 
-  // view helpers
+  // events padrão ERC-1155 (para fallback de parsing)
+  {
+    type: "event",
+    name: "TransferSingle",
+    inputs: [
+      { indexed: true, name: "operator", type: "address" },
+      { indexed: true, name: "from", type: "address" },
+      { indexed: true, name: "to", type: "address" },
+      { indexed: false, name: "id", type: "uint256" },
+      { indexed: false, name: "value", type: "uint256" },
+    ],
+    anonymous: false,
+  },
+  {
+    type: "event",
+    name: "TransferBatch",
+    inputs: [
+      { indexed: true, name: "operator", type: "address" },
+      { indexed: true, name: "from", type: "address" },
+      { indexed: true, name: "to", type: "address" },
+      { indexed: false, name: "ids", type: "uint256[]" },
+      { indexed: false, name: "values", type: "uint256[]" },
+    ],
+    anonymous: false,
+  },
+
+  // views helpers / acesso
   {
     type: "function",
     stateMutability: "view",
@@ -42,6 +68,27 @@ const ABI = [
     ],
     outputs: [{ name: "", type: "bool" }],
   },
+
+  // ERC-1155 padrão (para fallback/diagnóstico)
+  {
+    type: "function",
+    stateMutability: "view",
+    name: "uri",
+    inputs: [{ name: "id", type: "uint256" }],
+    outputs: [{ name: "", type: "string" }],
+  },
+  {
+    type: "function",
+    stateMutability: "view",
+    name: "balanceOf",
+    inputs: [
+      { name: "account", type: "address" },
+      { name: "id", type: "uint256" },
+    ],
+    outputs: [{ name: "", type: "uint256" }],
+  },
+
+  // suas views
   {
     type: "function",
     stateMutability: "view",
@@ -86,9 +133,9 @@ const ABI = [
     name: "mintDiploma",
     inputs: [
       { name: "to", type: "address" },
-      { name: "uri", type: "string" },
+      { name: "uri_", type: "string" },
       {
-        name: "core",
+        name: "core_",
         type: "tuple",
         components: [
           { name: "studentName", type: "string" },
@@ -98,7 +145,7 @@ const ABI = [
         ],
       },
     ],
-    outputs: [{ name: "tokenId", type: "uint256" }], 
+    outputs: [{ name: "tokenId", type: "uint256" }], // conforme o contrato sugerido
   },
   {
     type: "function",
@@ -128,6 +175,10 @@ function ipfsToHttp(uri) {
   return uri;
 }
 
+function idToHex64(id) {
+  return BigInt(id).toString(16).padStart(64, "0");
+}
+
 function buildDataUriFromCore(core, extra = {}) {
   const metadata = {
     name: `${core.studentName} - ${core.course}`,
@@ -141,11 +192,14 @@ function buildDataUriFromCore(core, extra = {}) {
     ...extra,
   };
   const json = JSON.stringify(metadata);
-  const b64 = typeof window === "undefined" ? Buffer.from(json).toString("base64") : btoa(json);
+  const b64 =
+    typeof window === "undefined"
+      ? Buffer.from(json).toString("base64")
+      : btoa(json);
   return `data:application/json;base64,${b64}`;
 }
 
-export default function DiplomaDapp() {
+export default function DiplomaDapp1155() {
   const [hasMM, setHasMM] = useState(false);
   const [account, setAccount] = useState("");
   const [chainId, setChainId] = useState("");
@@ -158,12 +212,17 @@ export default function DiplomaDapp() {
 
   // mint form
   const [to, setTo] = useState("");
-  const [core, setCore] = useState({ studentName: "", course: "", institution: "", graduationDate: "" });
+  const [core, setCore] = useState({
+    studentName: "",
+    course: "",
+    institution: "",
+    graduationDate: "",
+  });
   const [metadataUri, setMetadataUri] = useState("");
   const [minting, setMinting] = useState(false);
   const [lastMintTokenId, setLastMintTokenId] = useState(null);
 
-  // query/revoke
+  // query/verify/revoke
   const [queryTokenId, setQueryTokenId] = useState("");
   const [diplomaView, setDiplomaView] = useState(null);
   const [verifyResult, setVerifyResult] = useState(null);
@@ -178,8 +237,12 @@ export default function DiplomaDapp() {
     const handleAccounts = (accs) => setAccount(accs?.[0] || "");
     const handleChain = (cid) => setChainId(cid);
 
-    mm.request({ method: "eth_accounts" }).then((accs) => handleAccounts(accs)).catch(() => {});
-    mm.request({ method: "eth_chainId" }).then((cid) => handleChain(cid)).catch(() => {});
+    mm.request({ method: "eth_accounts" })
+      .then((accs) => handleAccounts(accs))
+      .catch(() => {});
+    mm.request({ method: "eth_chainId" })
+      .then((cid) => handleChain(cid))
+      .catch(() => {});
 
     mm.on && mm.on("accountsChanged", handleAccounts);
     mm.on && mm.on("chainChanged", handleChain);
@@ -197,7 +260,9 @@ export default function DiplomaDapp() {
 
   async function connect() {
     try {
-      const accs = await window.ethereum.request({ method: "eth_requestAccounts" });
+      const accs = await window.ethereum.request({
+        method: "eth_requestAccounts",
+      });
       setAccount(accs[0]);
     } catch (err) {
       setStatus(`falha ao conectar: ${err.message}`);
@@ -211,7 +276,6 @@ export default function DiplomaDapp() {
         params: [{ chainId: sepoliaParams.chainId }],
       });
     } catch (switchError) {
-      // If the chain has not been added to MetaMask
       if (switchError.code === 4902) {
         await window.ethereum.request({
           method: "wallet_addEthereumChain",
@@ -238,18 +302,22 @@ export default function DiplomaDapp() {
       setContract(c);
       setStatus("contrato carregado");
 
-      // read role id from contract, fallback to ethers.id if not available
+      // Lê o role (ou calcula com ethers.id se o contrato não expor)
       let role;
       try {
         role = await c.INSTITUTION_ROLE();
-      } catch (_) {
+      } catch {
         role = ethers.id("INSTITUTION_ROLE");
       }
       setInstitutionRole(role);
 
       if (account) {
-        const isInst = await c.hasRole(role, account);
-        setIsInstitution(isInst);
+        try {
+          const isInst = await c.hasRole(role, account);
+          setIsInstitution(isInst);
+        } catch {
+          setIsInstitution(false);
+        }
       }
     } catch (err) {
       setStatus(`falha ao carregar contrato: ${err.message}`);
@@ -262,7 +330,7 @@ export default function DiplomaDapp() {
         try {
           const isInst = await contract.hasRole(institutionRole, account);
           setIsInstitution(isInst);
-        } catch (_) {
+        } catch {
           setIsInstitution(false);
         }
       }
@@ -274,25 +342,41 @@ export default function DiplomaDapp() {
     if (!isInstitution) return setStatus("sua conta não possui INSTITUTION_ROLE");
     if (!ethers.isAddress(to)) return setStatus("endereço do aluno inválido");
     if (!metadataUri) return setStatus("preencha o metadata URI (ou gere do core)");
+
     try {
       setMinting(true);
       setStatus("enviando transação de mint...");
+      // mintDiploma(to, uri_, core_) -> retorna tokenId (uint256)
       const tx = await contract.mintDiploma(to, metadataUri, core);
       const rc = await tx.wait();
 
-      // try to parse event to get tokenId
       let mintedId = null;
-      for (const log of rc.logs || []) {
-        try {
-          const parsed = contract.interface.parseLog(log);
-          if (parsed?.name === "DiplomaIssued") {
-            mintedId = parsed.args?.tokenId?.toString();
-            break;
-          }
-        } catch (_) {}
-      }
-      setLastMintTokenId(mintedId);
-      setStatus(mintedId ? `mint realizado. tokenId ${mintedId}` : "mint realizado. tokenId não extraído (verifique no explorer)");
+
+      // 1) tenta pegar retorno direto (alguns providers expõem em rc.logs/rc.events? geralmente não),
+      // 2) parse do evento custom,
+      // 3) fallback TransferSingle
+      try {
+        for (const log of rc.logs || []) {
+          try {
+            const parsed = contract.interface.parseLog(log);
+            if (parsed?.name === "DiplomaIssued") {
+              mintedId = parsed.args?.tokenId?.toString();
+              break;
+            }
+            if (parsed?.name === "TransferSingle" && parsed.args?.from === ethers.ZeroAddress) {
+              mintedId = parsed.args?.id?.toString();
+              break;
+            }
+          } catch {}
+        }
+      } catch {}
+
+      setLastMintTokenId(mintedId || null);
+      setStatus(
+        mintedId
+          ? `mint realizado. tokenId ${mintedId}`
+          : "mint realizado. tokenId não extraído (verifique no explorer)"
+      );
     } catch (err) {
       setStatus(`erro no mint: ${err.shortMessage || err.message}`);
     } finally {
@@ -304,8 +388,9 @@ export default function DiplomaDapp() {
     if (!contract) return setStatus("carregue o contrato primeiro");
     if (!queryTokenId) return setStatus("informe um tokenId");
     try {
+      // usa getDiploma do contrato 1155
       const v = await contract.getDiploma(queryTokenId);
-      
+
       const viewObj = {
         tokenId: v.tokenId?.toString?.() ?? v[0]?.toString?.(),
         holder: v.holder ?? v[1],
@@ -326,7 +411,27 @@ export default function DiplomaDapp() {
     if (!contract) return setStatus("carregue o contrato primeiro");
     if (!queryTokenId) return setStatus("informe um tokenId");
     try {
-      const ok = await contract.verifyDiploma(queryTokenId);
+      // Preferencial: verifyDiploma(id)
+      let ok = false;
+      try {
+        ok = !!(await contract.verifyDiploma(queryTokenId));
+      } catch {
+        ok = false;
+      }
+
+      // Opcional: combinar com saldo da conta conectada (1155)
+      // se quiser validar que a conta tem 1 unidade daquele id
+      if (account) {
+        try {
+          const bal = await contract.balanceOf(account, queryTokenId);
+          const has = bal && BigInt(bal) > 0n;
+          // Considere válido apenas se não revogado e com saldo
+          ok = ok && has;
+        } catch {
+          // se balanceOf falhar, mantemos o resultado anterior
+        }
+      }
+
       setVerifyResult(!!ok);
       setStatus("verificação realizada");
     } catch (err) {
@@ -359,8 +464,10 @@ export default function DiplomaDapp() {
     <div className="min-h-screen bg-neutral-50 text-neutral-900">
       <div className="max-w-5xl mx-auto p-6">
         <div className="mb-6">
-          <p className="text-2xl">Diploma dApp – Soulbound NFT (ERC-721)</p>
-          <p className="text-sm text-neutral-600 mt-1">Conecte o MetaMask, carregue o contrato e interaja (mint, verificar, revogar, consultar).</p>
+          <p className="text-2xl">Diploma dApp – Soulbound NFT (ERC-1155)</p>
+          <p className="text-sm text-neutral-600 mt-1">
+            Conecte o MetaMask, carregue o contrato e interaja (mint, verificar, revogar, consultar).
+          </p>
         </div>
 
         {/* Wallet / Network */}
@@ -368,15 +475,27 @@ export default function DiplomaDapp() {
           <div className="p-4 rounded-2xl shadow bg-white">
             <p className="font-medium">Carteira</p>
             <div className="mt-2 flex items-center gap-2">
-              <button onClick={connect} className="px-3 py-2 rounded-xl shadow border bg-neutral-100 hover:bg-neutral-200">Conectar MetaMask</button>
-              <span className="text-sm truncate">{account ? `Conectado: ${account}` : "Desconectado"}</span>
+              <button
+                onClick={connect}
+                className="px-3 py-2 rounded-xl shadow border bg-neutral-100 hover:bg-neutral-200"
+              >
+                Conectar MetaMask
+              </button>
+              <span className="text-sm truncate">
+                {account ? `Conectado: ${account}` : "Desconectado"}
+              </span>
             </div>
           </div>
           <div className="p-4 rounded-2xl shadow bg-white">
             <p className="font-medium">Rede</p>
             <div className="mt-2 flex items-center gap-2">
               <span className="text-sm">chainId atual: {chainId || "?"}</span>
-              <button onClick={switchToSepolia} className="px-3 py-2 rounded-xl shadow border bg-neutral-100 hover:bg-neutral-200">Switch para Sepolia</button>
+              <button
+                onClick={switchToSepolia}
+                className="px-3 py-2 rounded-xl shadow border bg-neutral-100 hover:bg-neutral-200"
+              >
+                Switch para Sepolia
+              </button>
             </div>
           </div>
         </div>
@@ -388,14 +507,22 @@ export default function DiplomaDapp() {
             <input
               value={contractAddress}
               onChange={(e) => setContractAddress(e.target.value.trim())}
-              placeholder="Endereço do DiplomaNFT (0x...)"
+              placeholder="Endereço do Diploma1155 (0x...)"
               className="w-full px-3 py-2 rounded-xl border"
             />
-            <button onClick={loadContract} className="px-3 py-2 rounded-xl shadow border bg-neutral-100 hover:bg-neutral-200">Carregar</button>
+            <button
+              onClick={loadContract}
+              className="px-3 py-2 rounded-xl shadow border bg-neutral-100 hover:bg-neutral-200"
+            >
+              Carregar
+            </button>
           </div>
           {contract && (
             <div className="text-sm text-neutral-700 mt-2 space-y-1">
-              <div>INSTITUTION_ROLE: <span className="font-mono break-all">{institutionRole}</span></div>
+              <div>
+                INSTITUTION_ROLE:{" "}
+                <span className="font-mono break-all">{institutionRole}</span>
+              </div>
               <div>Você é instituição? {isInstitution ? "Sim" : "Não"}</div>
             </div>
           )}
@@ -405,16 +532,57 @@ export default function DiplomaDapp() {
         <div className="p-4 rounded-2xl shadow bg-white mb-6">
           <p className="font-medium">Emitir diploma (mint) – requer INSTITUTION_ROLE</p>
           <div className="grid md:grid-cols-2 gap-3 mt-3">
-            <input value={to} onChange={(e) => setTo(e.target.value)} placeholder="Endereço do aluno (0x...)" className="px-3 py-2 rounded-xl border" />
-            <input value={core.studentName} onChange={(e) => setCore({ ...core, studentName: e.target.value })} placeholder="Nome do aluno" className="px-3 py-2 rounded-xl border" />
-            <input value={core.course} onChange={(e) => setCore({ ...core, course: e.target.value })} placeholder="Curso" className="px-3 py-2 rounded-xl border" />
-            <input value={core.institution} onChange={(e) => setCore({ ...core, institution: e.target.value })} placeholder="Instituição" className="px-3 py-2 rounded-xl border" />
-            <input value={core.graduationDate} onChange={(e) => setCore({ ...core, graduationDate: e.target.value })} placeholder="Data de conclusão (ISO 8601)" className="px-3 py-2 rounded-xl border" />
-            <input value={metadataUri} onChange={(e) => setMetadataUri(e.target.value)} placeholder="Metadata URI (ipfs://... ou data:...)" className="px-3 py-2 rounded-xl border" />
+            <input
+              value={to}
+              onChange={(e) => setTo(e.target.value)}
+              placeholder="Endereço do aluno (0x...)"
+              className="px-3 py-2 rounded-xl border"
+            />
+            <input
+              value={core.studentName}
+              onChange={(e) => setCore({ ...core, studentName: e.target.value })}
+              placeholder="Nome do aluno"
+              className="px-3 py-2 rounded-xl border"
+            />
+            <input
+              value={core.course}
+              onChange={(e) => setCore({ ...core, course: e.target.value })}
+              placeholder="Curso"
+              className="px-3 py-2 rounded-xl border"
+            />
+            <input
+              value={core.institution}
+              onChange={(e) => setCore({ ...core, institution: e.target.value })}
+              placeholder="Instituição"
+              className="px-3 py-2 rounded-xl border"
+            />
+            <input
+              value={core.graduationDate}
+              onChange={(e) => setCore({ ...core, graduationDate: e.target.value })}
+              placeholder="Data de conclusão (ISO 8601)"
+              className="px-3 py-2 rounded-xl border"
+            />
+            <input
+              value={metadataUri}
+              onChange={(e) => setMetadataUri(e.target.value)}
+              placeholder="Metadata URI (ipfs://... ou data:...)"
+              className="px-3 py-2 rounded-xl border"
+            />
           </div>
           <div className="mt-3 flex items-center gap-2">
-            <button onClick={generateMetadataFromCore} className="px-3 py-2 rounded-xl shadow border bg-neutral-100 hover:bg-neutral-200">Gerar metadata URI do core</button>
-            <button onClick={doMint} disabled={minting} className="px-3 py-2 rounded-xl shadow border bg-neutral-900 text-white hover:bg-neutral-800 disabled:opacity-60">{minting ? "Minting..." : "Emitir diploma"}</button>
+            <button
+              onClick={generateMetadataFromCore}
+              className="px-3 py-2 rounded-xl shadow border bg-neutral-100 hover:bg-neutral-200"
+            >
+              Gerar metadata URI do core
+            </button>
+            <button
+              onClick={doMint}
+              disabled={minting}
+              className="px-3 py-2 rounded-xl shadow border bg-neutral-900 text-white hover:bg-neutral-800 disabled:opacity-60"
+            >
+              {minting ? "Minting..." : "Emitir diploma"}
+            </button>
           </div>
           {lastMintTokenId && (
             <p className="text-sm mt-2">Último tokenId emitido: {lastMintTokenId}</p>
@@ -426,16 +594,38 @@ export default function DiplomaDapp() {
           <div className="p-4 rounded-2xl shadow bg-white">
             <p className="font-medium">Consultar diploma</p>
             <div className="mt-2 flex gap-2">
-              <input value={queryTokenId} onChange={(e) => setQueryTokenId(e.target.value)} placeholder="tokenId" className="px-3 py-2 rounded-xl border w-full" />
-              <button onClick={doGet} className="px-3 py-2 rounded-xl shadow border bg-neutral-100 hover:bg-neutral-200">Buscar</button>
+              <input
+                value={queryTokenId}
+                onChange={(e) => setQueryTokenId(e.target.value)}
+                placeholder="tokenId"
+                className="px-3 py-2 rounded-xl border w-full"
+              />
+              <button
+                onClick={doGet}
+                className="px-3 py-2 rounded-xl shadow border bg-neutral-100 hover:bg-neutral-200"
+              >
+                Buscar
+              </button>
             </div>
             {diplomaView && (
               <div className="text-sm mt-3 space-y-1">
                 <div>tokenId: {diplomaView.tokenId}</div>
                 <div>holder: {diplomaView.holder}</div>
                 <div>revogado: {diplomaView.revoked ? "sim" : "não"}</div>
-                {diplomaView.revoked && <div>motivo: {diplomaView.revokeReason}</div>}
-                <div>tokenURI: <a href={ipfsToHttp(diplomaView.tokenURIString)} target="_blank" rel="noreferrer" className="underline break-all">{diplomaView.tokenURIString}</a></div>
+                {diplomaView.revoked && (
+                  <div>motivo: {diplomaView.revokeReason}</div>
+                )}
+                <div>
+                  tokenURI:{" "}
+                  <a
+                    href={ipfsToHttp(diplomaView.tokenURIString)}
+                    target="_blank"
+                    rel="noreferrer"
+                    className="underline break-all"
+                  >
+                    {diplomaView.tokenURIString}
+                  </a>
+                </div>
                 <div className="pt-2">
                   <p className="font-medium">Core</p>
                   <div>Aluno: {diplomaView.core?.studentName}</div>
@@ -450,23 +640,48 @@ export default function DiplomaDapp() {
           <div className="p-4 rounded-2xl shadow bg-white">
             <p className="font-medium">Verificar / Revogar</p>
             <div className="mt-2 flex items-center gap-2">
-              <button onClick={doVerify} className="px-3 py-2 rounded-xl shadow border bg-neutral-100 hover:bg-neutral-200">Verificar validade</button>
-              {verifyResult !== null && <span className="text-sm">válido? {verifyResult ? "sim" : "não"}</span>}
+              <button
+                onClick={doVerify}
+                className="px-3 py-2 rounded-xl shadow border bg-neutral-100 hover:bg-neutral-200"
+              >
+                Verificar validade
+              </button>
+              {verifyResult !== null && (
+                <span className="text-sm">válido? {verifyResult ? "sim" : "não"}</span>
+              )}
             </div>
             <div className="mt-4 space-y-2">
-              <input value={revokeReason} onChange={(e) => setRevokeReason(e.target.value)} placeholder="Motivo da revogação" className="px-3 py-2 rounded-xl border w-full" />
-              <button onClick={doRevoke} disabled={revoking} className="px-3 py-2 rounded-xl shadow border bg-red-600 text-white hover:bg-red-500 disabled:opacity-60">{revoking ? "Revogando..." : "Revogar diploma"}</button>
+              <input
+                value={revokeReason}
+                onChange={(e) => setRevokeReason(e.target.value)}
+                placeholder="Motivo da revogação"
+                className="px-3 py-2 rounded-xl border w-full"
+              />
+              <button
+                onClick={doRevoke}
+                disabled={revoking}
+                className="px-3 py-2 rounded-xl shadow border bg-red-600 text-white hover:bg-red-500 disabled:opacity-60"
+              >
+                {revoking ? "Revogando..." : "Revogar diploma"}
+              </button>
             </div>
           </div>
         </div>
 
         {/* Status bar */}
         {status && (
-          <div className="p-3 rounded-xl bg-amber-50 border border-amber-200 text-amber-900 text-sm">{status}</div>
+          <div className="p-3 rounded-xl bg-amber-50 border border-amber-200 text-amber-900 text-sm">
+            {status}
+          </div>
         )}
 
         <div className="mt-10 text-xs text-neutral-500">
-          <p>Dicas: se o tokenURI começar com ipfs://, o link será redirecionado para ipfs.io. Gere "data:application/json;base64,..." se quiser embutir o metadata sem IPFS.</p>
+          <p>
+            Dicas: se o tokenURI começar com ipfs://, o link será redirecionado
+            para ipfs.io. Gere "data:application/json;base64,..." se quiser
+            embutir o metadata sem IPFS. Em ERC-1155, se optar por usar
+            uri(id) com {"{id}"}, substitua pelo id em hex de 64 caracteres.
+          </p>
         </div>
       </div>
     </div>
